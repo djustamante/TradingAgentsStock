@@ -23,6 +23,15 @@ class TradingMemoryLog:
     # containing directory (0o700) and the log file itself (0o600).
     _DIR_MODE = 0o700
     _FILE_MODE = 0o600
+    # If content ever contains the literal separator marker, the parser's
+    # ``.split(_SEPARATOR)`` would split mid-entry and the next load would
+    # see a mangled / truncated record. The docstring on _SEPARATOR says
+    # the marker "cannot appear in LLM prose" — true by convention, but
+    # external content (news bodies, earnings transcripts) injected
+    # through tool results into ``final_trade_decision`` could in
+    # principle contain it verbatim. Escape on write.
+    _MARKER = "<!-- ENTRY_END -->"
+    _MARKER_ESCAPED = "<!-- ENTRY_END__ESCAPED -->"
 
     def __init__(self, config: dict = None):
         cfg = config or {}
@@ -46,6 +55,25 @@ class TradingMemoryLog:
 
     # --- Write path (Phase A) ---
 
+    @classmethod
+    def _escape_separator(cls, text: str) -> str:
+        """Replace literal ``<!-- ENTRY_END -->`` occurrences in ``text``.
+
+        Defense against poisoned content: if a news article body or
+        earnings transcript injected via tool results into the LLM's
+        final_trade_decision happens to contain the literal marker, the
+        parser's ``.split(_SEPARATOR)`` would terminate the entry early,
+        merging or truncating records. Replace on write so the parser's
+        split contract is always preserved.
+
+        Idempotent: replacing the already-escaped marker again is a no-op
+        because the search string (with the bare ``ENTRY_END``) doesn't
+        match the escaped form (``ENTRY_END__ESCAPED``).
+        """
+        if not isinstance(text, str) or not text:
+            return text
+        return text.replace(cls._MARKER, cls._MARKER_ESCAPED)
+
     def store_decision(
         self,
         ticker: str,
@@ -63,7 +91,8 @@ class TradingMemoryLog:
                     return
         rating = parse_rating(final_trade_decision)
         tag = f"[{trade_date} | {ticker} | {rating} | pending]"
-        entry = f"{tag}\n\nDECISION:\n{final_trade_decision}{self._SEPARATOR}"
+        safe_decision = self._escape_separator(final_trade_decision)
+        entry = f"{tag}\n\nDECISION:\n{safe_decision}{self._SEPARATOR}"
         with open(self._log_path, "a", encoding="utf-8") as f:
             f.write(entry)
         # Tighten the file mode after every write so the log can't be read
@@ -171,8 +200,9 @@ class TradingMemoryLog:
                     f" | {raw_pct} | {alpha_pct} | {holding_days}d]"
                 )
                 rest = "\n".join(lines[1:])
+                safe_reflection = self._escape_separator(reflection)
                 new_blocks.append(
-                    f"{new_tag}\n\n{rest.lstrip()}\n\nREFLECTION:\n{reflection}"
+                    f"{new_tag}\n\n{rest.lstrip()}\n\nREFLECTION:\n{safe_reflection}"
                 )
                 updated = True
             else:
@@ -229,8 +259,9 @@ class TradingMemoryLog:
                         f" | {raw_pct} | {alpha_pct} | {upd['holding_days']}d]"
                     )
                     rest = "\n".join(lines[1:])
+                    safe_reflection = self._escape_separator(upd["reflection"])
                     new_blocks.append(
-                        f"{new_tag}\n\n{rest.lstrip()}\n\nREFLECTION:\n{upd['reflection']}"
+                        f"{new_tag}\n\n{rest.lstrip()}\n\nREFLECTION:\n{safe_reflection}"
                     )
                     del update_map[(trade_date, ticker)]
                     matched = True
