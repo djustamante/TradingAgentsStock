@@ -1,5 +1,6 @@
 """Append-only markdown decision log for TradingAgents."""
 
+import os
 from typing import List, Optional
 from pathlib import Path
 import re
@@ -16,13 +17,30 @@ class TradingMemoryLog:
     _DECISION_RE = re.compile(r"DECISION:\n(.*?)(?=\nREFLECTION:|\Z)", re.DOTALL)
     _REFLECTION_RE = re.compile(r"REFLECTION:\n(.*?)$", re.DOTALL)
 
+    # The memory log contains trading rationales and reflections; both can
+    # leak portfolio interest or strategy signals to a coresident attacker
+    # if the file is world-readable. Force owner-only modes on the
+    # containing directory (0o700) and the log file itself (0o600).
+    _DIR_MODE = 0o700
+    _FILE_MODE = 0o600
+
     def __init__(self, config: dict = None):
         cfg = config or {}
         self._log_path = None
         path = cfg.get("memory_log_path")
         if path:
             self._log_path = Path(path).expanduser()
-            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._log_path.parent.mkdir(
+                parents=True, exist_ok=True, mode=self._DIR_MODE,
+            )
+            # mkdir(mode=) only honours the mode for newly-created dirs.
+            # Tighten existing directories created with looser umask too.
+            try:
+                os.chmod(self._log_path.parent, self._DIR_MODE)
+            except OSError:
+                # Best-effort — if we can't chmod (e.g. dir owned by
+                # someone else), don't crash the run.
+                pass
         # Optional cap on resolved entries. None disables rotation.
         self._max_entries = cfg.get("memory_log_max_entries")
 
@@ -48,6 +66,13 @@ class TradingMemoryLog:
         entry = f"{tag}\n\nDECISION:\n{final_trade_decision}{self._SEPARATOR}"
         with open(self._log_path, "a", encoding="utf-8") as f:
             f.write(entry)
+        # Tighten the file mode after every write so the log can't be read
+        # by another local user even if the file was first created with a
+        # looser umask before this hardening.
+        try:
+            os.chmod(self._log_path, self._FILE_MODE)
+        except OSError:
+            pass
 
     # --- Read path (Phase A) ---
 
@@ -160,6 +185,10 @@ class TradingMemoryLog:
         new_text = self._SEPARATOR.join(new_blocks)
         tmp_path = self._log_path.with_suffix(".tmp")
         tmp_path.write_text(new_text, encoding="utf-8")
+        try:
+            os.chmod(tmp_path, self._FILE_MODE)
+        except OSError:
+            pass
         tmp_path.replace(self._log_path)
 
     def batch_update_with_outcomes(self, updates: List[dict]) -> None:
@@ -214,6 +243,10 @@ class TradingMemoryLog:
         new_text = self._SEPARATOR.join(new_blocks)
         tmp_path = self._log_path.with_suffix(".tmp")
         tmp_path.write_text(new_text, encoding="utf-8")
+        try:
+            os.chmod(tmp_path, self._FILE_MODE)
+        except OSError:
+            pass
         tmp_path.replace(self._log_path)
 
     # --- Helpers ---
