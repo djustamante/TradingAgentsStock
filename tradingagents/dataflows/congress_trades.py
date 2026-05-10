@@ -23,6 +23,7 @@ Caching uses :mod:`tradingagents.dataflows._cache`:
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Any, List, Optional, TypedDict
 
@@ -36,6 +37,19 @@ logger = logging.getLogger(__name__)
 _SOURCE = "congress_trades"
 _LAMBDA_FINANCE_URL = "https://www.lambdafin.com/api/congressional/trades"
 _FINNHUB_URL = "https://finnhub.io/api/v1/stock/congressional-trading"
+# Defense-in-depth: even though we authenticate Finnhub via the
+# ``X-Finnhub-Token`` header (not ``?token=``), this pattern strips any
+# leaked token=... from logged URLs in case a future call site or an
+# upstream library still embeds it. Match `token=` followed by any
+# non-`&` / non-whitespace chars; replace the value with a placeholder.
+_FINNHUB_TOKEN_RE = re.compile(r"([?&]token=)[^&\s]+", re.IGNORECASE)
+
+
+def _redact_finnhub_token(text: str) -> str:
+    """Replace any ``token=<key>`` query param in ``text`` with a placeholder."""
+    if not isinstance(text, str) or not text:
+        return text
+    return _FINNHUB_TOKEN_RE.sub(r"\1***REDACTED***", text)
 _SENATE_SW_URL = (
     "https://senate-stock-watcher-data.s3-us-west-2.amazonaws.com/"
     "aggregate/all_transactions.json"
@@ -260,13 +274,26 @@ def _lambda_amounts(row: dict) -> tuple[float, float]:
 
 
 def _fetch_finnhub(ticker: str, api_key: str, cutoff_date) -> List[_Trade]:
-    resp = requests.get(
-        _FINNHUB_URL,
-        params={"symbol": ticker.upper(), "token": api_key},
-        timeout=_TIMEOUT,
-    )
-    resp.raise_for_status()
-    body = resp.json()
+    # Finnhub supports both ``?token=`` query-param auth and the
+    # ``X-Finnhub-Token`` header. Header auth is strictly safer: the
+    # query-param form leaks the key into request URLs that surface in
+    # requests.HTTPError messages, server-side access logs, and any
+    # log line that includes the exception's ``str()``.
+    try:
+        resp = requests.get(
+            _FINNHUB_URL,
+            params={"symbol": ticker.upper()},
+            headers={"X-Finnhub-Token": api_key},
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+    except Exception as e:
+        # Defense-in-depth: even with header auth, an HTTPError from a
+        # misbehaving proxy could in theory echo the original URL. Scrub
+        # ``token=...`` from the exception message before propagating so
+        # the calling logger never sees a real key.
+        raise RuntimeError(_redact_finnhub_token(str(e))) from None
     if not isinstance(body, dict):
         raise ValueError(f"unexpected response shape: {type(body).__name__}")
     rows = body.get("data") or []

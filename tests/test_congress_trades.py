@@ -1,10 +1,92 @@
 import os
 from datetime import date, timedelta
+from unittest.mock import MagicMock
 
 import pytest
 
 from tradingagents.dataflows import congress_trades
 from tradingagents.dataflows.config import set_config
+
+
+# --- Finnhub auth + token-leak hardening ----------------------------------
+
+
+def test_redact_finnhub_token_replaces_value():
+    """Defensive helper: ``?token=<key>`` and ``&token=<key>`` in any
+    string get replaced with a placeholder so a leaked URL never logs
+    the actual key."""
+    url = "https://finnhub.io/api/v1/stock/x?symbol=AAPL&token=sk_secret_abc123"
+    out = congress_trades._redact_finnhub_token(url)
+    assert "sk_secret_abc123" not in out
+    assert "&token=***REDACTED***" in out
+
+
+def test_redact_finnhub_token_handles_question_mark_form():
+    url = "https://example.com/x?token=mykey"
+    out = congress_trades._redact_finnhub_token(url)
+    assert "mykey" not in out
+    assert "?token=***REDACTED***" in out
+
+
+def test_redact_finnhub_token_passes_through_when_no_token():
+    """No-op on strings without ``token=``."""
+    s = "Finnhub: 500 Internal Server Error"
+    assert congress_trades._redact_finnhub_token(s) == s
+
+
+def test_redact_finnhub_token_handles_non_string():
+    """The helper is sometimes called with an exception value before
+    its message has been str()-ified — must not crash."""
+    assert congress_trades._redact_finnhub_token(None) is None
+    assert congress_trades._redact_finnhub_token("") == ""
+
+
+def test_fetch_finnhub_uses_header_auth_not_query_param(monkeypatch):
+    """Regression for security audit H1: the API key must travel in the
+    X-Finnhub-Token header, NOT in the URL's ``?token=`` query param.
+    Header-only auth eliminates the leak-in-HTTPError vector."""
+    captured: dict = {}
+    fake_resp = MagicMock()
+    fake_resp.raise_for_status = MagicMock()
+    fake_resp.json.return_value = {"data": []}
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        captured["params"] = params or {}
+        captured["headers"] = headers or {}
+        return fake_resp
+
+    monkeypatch.setattr(congress_trades.requests, "get", fake_get)
+    congress_trades._fetch_finnhub("AAPL", "sk_secret_value", date.today())
+
+    assert "token" not in captured["params"], (
+        "API key still being passed as URL query param — leaks into request URLs"
+    )
+    assert captured["headers"].get("X-Finnhub-Token") == "sk_secret_value", (
+        "Finnhub key must travel in X-Finnhub-Token header"
+    )
+
+
+def test_fetch_finnhub_redacts_token_from_propagated_exception(monkeypatch):
+    """If requests raises with a message containing ``token=<key>``
+    (e.g. from a misbehaving proxy that echoes the original URL even
+    though we used header auth), the propagated exception's str() must
+    have the key redacted before any logger sees it."""
+    def fake_get(*args, **kwargs):
+        # Simulate the kind of message requests.HTTPError emits when
+        # raise_for_status() fires on a 4xx/5xx — includes the URL.
+        raise RuntimeError(
+            "401 Client Error: Unauthorized for url: "
+            "https://finnhub.io/api/v1/x?symbol=AAPL&token=sk_THE_REAL_KEY"
+        )
+
+    monkeypatch.setattr(congress_trades.requests, "get", fake_get)
+    with pytest.raises(RuntimeError) as excinfo:
+        congress_trades._fetch_finnhub("AAPL", "sk_THE_REAL_KEY", date.today())
+
+    assert "sk_THE_REAL_KEY" not in str(excinfo.value), (
+        "Finnhub API key leaked through error message — defense-in-depth failed"
+    )
+    assert "***REDACTED***" in str(excinfo.value)
 
 
 # --- Pure parser unit tests -------------------------------------------------
