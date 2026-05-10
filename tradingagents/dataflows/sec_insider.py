@@ -25,11 +25,17 @@ from __future__ import annotations
 import json
 import logging
 import time
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as ET  # noqa: S405  Element type/ParseError only — parsing goes through defusedxml below
 from datetime import datetime, timedelta
 from typing import List, Optional, TypedDict
 
 import requests
+# Use defusedxml for the actual parse entry point. SEC EDGAR XML is
+# attacker-influenceable in principle (vendor compromise / MITM), and
+# stock xml.etree.ElementTree is vulnerable to XXE / billion-laughs.
+# defusedxml's fromstring returns the same Element type so all the
+# downstream ``node.find(path)`` / ``.text`` access keeps working.
+from defusedxml.ElementTree import fromstring as _defused_fromstring
 
 from tradingagents.dataflows._cache import cache_get, cache_put
 from tradingagents.dataflows.config import get_config
@@ -207,9 +213,18 @@ def _xml_float(node: Optional[ET.Element], path: str) -> Optional[float]:
 def _parse_form4_xml(xml_text: str) -> List[_Transaction]:
     """Extract non-derivative transactions from a Form 4 XML document."""
     try:
-        root = ET.fromstring(xml_text)
+        root = _defused_fromstring(xml_text)
     except ET.ParseError as e:
+        # defusedxml re-raises stdlib ParseError; entity-related attacks
+        # raise defusedxml.EntitiesForbidden / DTDForbidden which are
+        # also ParseError subclasses, so this except still catches them.
         logger.warning("Form 4 XML parse error: %s", e)
+        return []
+    except Exception as e:  # noqa: BLE001  defusedxml.* security exceptions
+        # Any non-ParseError exception from defusedxml is an attack
+        # rejection (EntitiesForbidden, DTDForbidden, ...). Log loudly
+        # because a benign SEC document will never trip these.
+        logger.warning("Form 4 XML rejected by defusedxml: %s", e)
         return []
 
     # Reporting owner (first one — Form 4 can have multiple but most have one)

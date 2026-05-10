@@ -76,6 +76,44 @@ def test_parse_form4_xml_handles_malformed_input():
     assert sec_insider._parse_form4_xml("not xml at all") == []
 
 
+def test_parse_form4_xml_rejects_xxe_external_entity():
+    """SEC EDGAR responses are attacker-influenceable in principle
+    (vendor compromise / MITM). The parser must reject XML with
+    external entity declarations — stdlib ElementTree is vulnerable
+    to XXE; defusedxml is the standard defense and is now used."""
+    xxe = (
+        '<?xml version="1.0"?>\n'
+        '<!DOCTYPE foo [\n'
+        '  <!ENTITY xxe SYSTEM "file:///etc/passwd">\n'
+        ']>\n'
+        '<ownershipDocument>\n'
+        '  <reportingOwner>&xxe;</reportingOwner>\n'
+        '</ownershipDocument>\n'
+    )
+    # defusedxml raises EntitiesForbidden which is a ParseError subclass;
+    # the parser catches it and returns []. The important guarantee is
+    # that the entity is NEVER expanded into the result.
+    result = sec_insider._parse_form4_xml(xxe)
+    assert result == []
+
+
+def test_parse_form4_xml_rejects_billion_laughs_dos():
+    """Classic XML DoS: a single innermost entity expands exponentially.
+    defusedxml refuses to expand entity definitions at all."""
+    billion_laughs = (
+        '<?xml version="1.0"?>\n'
+        '<!DOCTYPE lolz [\n'
+        '  <!ENTITY lol "lol">\n'
+        '  <!ENTITY lol1 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">\n'
+        '  <!ENTITY lol2 "&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;">\n'
+        ']>\n'
+        '<ownershipDocument><reportingOwner>&lol2;</reportingOwner></ownershipDocument>\n'
+    )
+    # Must return [] quickly, not hang expanding entities.
+    result = sec_insider._parse_form4_xml(billion_laughs)
+    assert result == []
+
+
 def test_parse_form4_xml_skips_transactions_missing_shares():
     xml = """<?xml version="1.0"?>
 <ownershipDocument>
