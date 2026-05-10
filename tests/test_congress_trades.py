@@ -89,6 +89,77 @@ def test_fetch_finnhub_redacts_token_from_propagated_exception(monkeypatch):
     assert "***REDACTED***" in str(excinfo.value)
 
 
+# --- Senate Stock Watcher size cap ----------------------------------------
+
+
+def _streaming_resp(body: bytes, *, content_length: str = None, encoding: str = "utf-8"):
+    """Minimal mock of a streaming requests.Response: iter_content + headers."""
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.headers = {"Content-Length": content_length} if content_length else {}
+    resp.encoding = encoding
+    # Split into chunks roughly the size requests uses
+    chunk_size = 64 * 1024
+    chunks = [body[i:i + chunk_size] for i in range(0, len(body), chunk_size)] or [b""]
+    resp.iter_content.return_value = iter(chunks)
+    resp.close = MagicMock()
+    return resp
+
+
+def test_fetch_with_size_cap_returns_body_when_under_cap(monkeypatch):
+    body = b'{"transactions": []}'
+    monkeypatch.setattr(
+        congress_trades.requests, "get",
+        lambda *a, **kw: _streaming_resp(body, content_length=str(len(body))),
+    )
+    out = congress_trades._fetch_with_size_cap(
+        "https://x", max_bytes=1_000_000, timeout=10,
+    )
+    assert out == '{"transactions": []}'
+
+
+def test_fetch_with_size_cap_rejects_oversized_content_length(monkeypatch):
+    """A server declaring a huge body must be rejected BEFORE we read it
+    (the cheap fail-fast path)."""
+    monkeypatch.setattr(
+        congress_trades.requests, "get",
+        lambda *a, **kw: _streaming_resp(b"unused", content_length="200000000"),
+    )
+    with pytest.raises(ValueError, match="exceeds .* cap"):
+        congress_trades._fetch_with_size_cap(
+            "https://x", max_bytes=100_000_000, timeout=10,
+        )
+
+
+def test_fetch_with_size_cap_rejects_streamed_overflow(monkeypatch):
+    """The defense-in-depth check: server lies about / omits Content-Length
+    and emits more bytes than the cap. The chunked accumulator must abort."""
+    # ~200KB body, cap at 100KB
+    big_body = b"x" * (200 * 1024)
+    monkeypatch.setattr(
+        congress_trades.requests, "get",
+        lambda *a, **kw: _streaming_resp(big_body),
+    )
+    with pytest.raises(ValueError, match="exceeded .* cap"):
+        congress_trades._fetch_with_size_cap(
+            "https://x", max_bytes=100 * 1024, timeout=10,
+        )
+
+
+def test_fetch_with_size_cap_tolerates_bad_content_length(monkeypatch):
+    """A garbage Content-Length header should not crash the helper —
+    the streamed-overflow check still protects us."""
+    body = b'{"transactions": []}'
+    monkeypatch.setattr(
+        congress_trades.requests, "get",
+        lambda *a, **kw: _streaming_resp(body, content_length="not-a-number"),
+    )
+    out = congress_trades._fetch_with_size_cap(
+        "https://x", max_bytes=1_000_000, timeout=10,
+    )
+    assert out == '{"transactions": []}'
+
+
 # --- Pure parser unit tests -------------------------------------------------
 
 

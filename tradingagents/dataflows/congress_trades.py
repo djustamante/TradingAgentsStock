@@ -37,6 +37,11 @@ logger = logging.getLogger(__name__)
 _SOURCE = "congress_trades"
 _LAMBDA_FINANCE_URL = "https://www.lambdafin.com/api/congressional/trades"
 _FINNHUB_URL = "https://finnhub.io/api/v1/stock/congressional-trading"
+# Senate Stock Watcher aggregate dataset is ~50 MB in practice. Hard-cap
+# at 100 MB so a compromised S3 bucket (or MITM) returning a multi-GB
+# body can't OOM the pipeline. ``_fetch_with_size_cap`` enforces this by
+# streaming bytes and aborting once the running total exceeds the cap.
+_SSW_MAX_BYTES = 100 * 1024 * 1024
 # Defense-in-depth: even though we authenticate Finnhub via the
 # ``X-Finnhub-Token`` header (not ``?token=``), this pattern strips any
 # leaked token=... from logged URLs in case a future call site or an
@@ -332,6 +337,55 @@ def _parse_finnhub_row(row: dict) -> Optional[_Trade]:
 # --- Source: Senate Stock Watcher ------------------------------------------
 
 
+def _fetch_with_size_cap(url: str, *, max_bytes: int, timeout: int) -> str:
+    """Fetch ``url`` and return its decoded text, refusing >``max_bytes``.
+
+    Uses ``stream=True`` + chunked reads so a hostile / compromised server
+    can't OOM the pipeline by emitting a multi-GB body. Two checks fire:
+
+    1. If the server declares a ``Content-Length`` larger than the cap,
+       abort immediately without reading the body.
+    2. Otherwise, accumulate chunks and abort once the running total
+       crosses the cap (defends against missing or lying ``Content-Length``).
+    """
+    resp = requests.get(url, stream=True, timeout=timeout)
+    try:
+        resp.raise_for_status()
+
+        declared_len = resp.headers.get("Content-Length")
+        if declared_len:
+            try:
+                if int(declared_len) > max_bytes:
+                    raise ValueError(
+                        f"response Content-Length ({declared_len}) exceeds "
+                        f"{max_bytes}-byte cap"
+                    )
+            except (TypeError, ValueError) as e:
+                # Bad Content-Length header — keep going, the chunked
+                # check below still guards us. Only re-raise if it WAS
+                # the size-exceeds-cap error we just raised.
+                if "exceeds" in str(e):
+                    raise
+
+        chunks: list[bytes] = []
+        received = 0
+        for chunk in resp.iter_content(chunk_size=64 * 1024):
+            if not chunk:
+                continue
+            received += len(chunk)
+            if received > max_bytes:
+                raise ValueError(
+                    f"response exceeded {max_bytes}-byte cap after "
+                    f"{received} bytes"
+                )
+            chunks.append(chunk)
+
+        body_bytes = b"".join(chunks)
+        return body_bytes.decode(resp.encoding or "utf-8", errors="replace")
+    finally:
+        resp.close()
+
+
 def _fetch_senate_stock_watcher(ticker: str, cutoff_date) -> List[_Trade]:
     """Fetch the aggregate Senate PTR dataset and filter to ``ticker``."""
     cache_key = {"kind": "ssw_full"}
@@ -339,9 +393,9 @@ def _fetch_senate_stock_watcher(ticker: str, cutoff_date) -> List[_Trade]:
     if cached is not None:
         rows = _parse_ssw_payload(cached)
     else:
-        resp = requests.get(_SENATE_SW_URL, timeout=120)
-        resp.raise_for_status()
-        body = resp.text
+        body = _fetch_with_size_cap(
+            _SENATE_SW_URL, max_bytes=_SSW_MAX_BYTES, timeout=120
+        )
         cache_put(_SOURCE, cache_key, body)
         rows = _parse_ssw_payload(body)
 
