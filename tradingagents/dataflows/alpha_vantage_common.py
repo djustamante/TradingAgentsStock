@@ -7,6 +7,12 @@ from io import StringIO
 
 API_BASE_URL = "https://www.alphavantage.co/query"
 
+# HTTP request timeout in seconds. Matches the ``_TIMEOUT`` convention used
+# by other vendor adapters in this package (congress_trades, lambda_finance_*,
+# etc.). A missing timeout lets a slow/hung Alpha Vantage server (or MITM)
+# stall the whole pipeline indefinitely — explicitly bounded here.
+_TIMEOUT = 30
+
 def get_api_key() -> str:
     """Retrieve the API key for Alpha Vantage from environment variables."""
     api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
@@ -63,7 +69,7 @@ def _make_api_request(function_name: str, params: dict) -> dict | str:
         # Remove entitlement if it's None or empty
         api_params.pop("entitlement", None)
     
-    response = requests.get(API_BASE_URL, params=api_params)
+    response = requests.get(API_BASE_URL, params=api_params, timeout=_TIMEOUT)
     response.raise_for_status()
 
     response_text = response.text
