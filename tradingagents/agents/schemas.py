@@ -19,7 +19,7 @@ so that:
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -168,6 +168,57 @@ def render_trader_proposal(proposal: TraderProposal) -> str:
 # ---------------------------------------------------------------------------
 
 
+class OptionsStrategy(BaseModel):
+    """One concrete options strategy attached to a Portfolio Manager verdict.
+
+    Strategies are picked by the LLM to match the rating direction crossed
+    with the implied-volatility regime (cheap premium → buy options;
+    expensive premium → sell options). Every strike referenced in ``legs``
+    MUST come from the options report that fed the prompt — the LLM is
+    instructed not to invent strikes.
+    """
+
+    name: str = Field(
+        description=(
+            "Strategy name, e.g. 'Bull Call Spread', 'Cash-Secured Put', "
+            "'Iron Condor', 'Covered Call', 'Calendar Spread', "
+            "'Protective Put', 'Bear Put Spread'. Keep to the canonical "
+            "name an options trader would recognize."
+        ),
+    )
+    legs: str = Field(
+        description=(
+            "Concrete legs with real strikes and an approximate expiration. "
+            "Example: 'Buy AAPL Jun 200C, Sell AAPL Jun 210C'. Strikes MUST "
+            "match the options report supplied in the prompt; do not "
+            "fabricate values. If only a max-pain / call-wall / put-wall "
+            "level is available, anchor strikes near those."
+        ),
+    )
+    rationale: str = Field(
+        description=(
+            "One or two sentences explaining why this strategy fits the "
+            "rating direction crossed with the IV regime. Cite the IV rank "
+            "and at least one specific options-report data point."
+        ),
+    )
+    max_profit: str = Field(
+        description=(
+            "Maximum profit at expiry as a per-share or per-contract figure, "
+            "e.g. '+$8.20/share if AAPL >= 210 at June expiry' or "
+            "'+$1.50/share net premium received'."
+        ),
+    )
+    max_loss: str = Field(
+        description=(
+            "Maximum loss at expiry, also per-share or per-contract. For "
+            "naked-short legs (cash-secured put, short call) state the "
+            "capital-at-risk explicitly. E.g. '-$1.80/share premium paid' "
+            "or 'capped at -$195/share assignment cost minus premium'."
+        ),
+    )
+
+
 class PortfolioDecision(BaseModel):
     """Structured output produced by the Portfolio Manager.
 
@@ -204,6 +255,21 @@ class PortfolioDecision(BaseModel):
         default=None,
         description="Optional recommended holding period, e.g. '3-6 months'.",
     )
+    recommended_strategies: List[OptionsStrategy] = Field(
+        default_factory=list,
+        description=(
+            "Exactly THREE options strategies appropriate for the rating "
+            "direction crossed with the current IV regime. Pick strategies "
+            "that complement the equity rating: e.g. Buy rating + low IV "
+            "favours long calls / bull call spreads; Buy + high IV favours "
+            "cash-secured puts / covered calls; Hold favours iron condors / "
+            "calendar spreads / covered calls; Sell + high IV favours bear "
+            "call spreads; Sell + low IV favours long puts / bear put "
+            "spreads. Cite real strikes from the options report — never "
+            "invent values. If the options report is empty / unavailable, "
+            "return an empty list rather than hallucinated strategies."
+        ),
+    )
 
 
 def render_pm_decision(decision: PortfolioDecision) -> str:
@@ -225,4 +291,38 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
         parts.extend(["", f"**Price Target**: {decision.price_target}"])
     if decision.time_horizon:
         parts.extend(["", f"**Time Horizon**: {decision.time_horizon}"])
+    if decision.recommended_strategies:
+        parts.append("")
+        parts.append(_render_strategies_table(decision.recommended_strategies))
     return "\n".join(parts)
+
+
+def _render_strategies_table(strategies: List[OptionsStrategy]) -> str:
+    """Format an options-strategy list as a Markdown table.
+
+    The table uses pipe-escaping on every cell so a strategy description
+    containing a ``|`` (rare but possible — e.g. a leg specification like
+    ``'Sell put | Buy further OTM put'``) doesn't corrupt the table layout.
+    """
+    lines = [
+        "### Recommended Options Strategies",
+        "",
+        "| # | Strategy | Legs | Max Profit / Loss | Rationale |",
+        "|---|---|---|---|---|",
+    ]
+    for i, s in enumerate(strategies, start=1):
+        profit_loss = f"{_escape_pipe(s.max_profit)} / {_escape_pipe(s.max_loss)}"
+        lines.append(
+            f"| {i} | {_escape_pipe(s.name)} | {_escape_pipe(s.legs)} | "
+            f"{profit_loss} | {_escape_pipe(s.rationale)} |"
+        )
+    return "\n".join(lines)
+
+
+def _escape_pipe(text: str) -> str:
+    """Escape ``|`` characters so they don't break markdown table cells."""
+    if not isinstance(text, str):
+        return str(text)
+    # Replace pipe with HTML entity. Markdown renderers display it as ``|``
+    # but the table parser doesn't see it as a column separator.
+    return text.replace("\n", " ").replace("|", "&#124;")

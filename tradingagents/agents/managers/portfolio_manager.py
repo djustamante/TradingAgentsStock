@@ -32,12 +32,59 @@ def create_portfolio_manager(llm):
         research_plan = state["investment_plan"]
         trader_plan = state["trader_investment_plan"]
 
+        # Options data feeds the recommended_strategies field. Both are
+        # optional — empty values short-circuit the strategy-picking
+        # instruction so the LLM doesn't hallucinate strikes when no
+        # options data is available (e.g. an instrument with no listed
+        # options, or an upstream tool failure).
+        options_report = state.get("options_report") or ""
+        iv_snapshot = state.get("iv_snapshot") or ""
+
         past_context = state.get("past_context", "")
         lessons_line = (
             f"- Lessons from prior decisions and outcomes:\n{past_context}\n"
             if past_context
             else ""
         )
+
+        if options_report or iv_snapshot:
+            options_block = (
+                "\n**Options-Market Context** "
+                "(use these strikes verbatim; do NOT invent strike values):\n"
+                f"{iv_snapshot}\n\n"
+                f"{options_report}\n"
+            )
+            strategies_instruction = (
+                "\n**RECOMMENDED OPTIONS STRATEGIES** — populate the "
+                "``recommended_strategies`` field with EXACTLY THREE concrete "
+                "strategies that match the rating direction crossed with the "
+                "current IV regime. Pick from this map "
+                "(strategy choice depends on direction × volatility):\n"
+                "- **Buy / Overweight + low IV** (IV Rank ≲ 30): long call, "
+                "bull call spread, long stock + collar with skewed wings.\n"
+                "- **Buy / Overweight + high IV** (IV Rank ≳ 60): cash-secured "
+                "put, covered call (if existing position), bull put spread.\n"
+                "- **Hold** (any IV): iron condor between the put wall and "
+                "call wall, calendar spread at ATM, covered call.\n"
+                "- **Underweight / Sell + low IV**: long put, bear put spread, "
+                "protective put on existing position.\n"
+                "- **Underweight / Sell + high IV**: bear call spread, sell "
+                "naked call (only if institutional risk limits permit), "
+                "ratio call spread.\n"
+                "\nEvery strike you cite in ``legs`` MUST come from the "
+                "Options-Market Context above (spot, max-pain, call wall, "
+                "put wall, or strikes appearing in the unusual-activity "
+                "table). DO NOT invent strikes. If the options data is "
+                "thin or unavailable, return AN EMPTY LIST for "
+                "``recommended_strategies`` rather than hallucinating.\n"
+            )
+        else:
+            options_block = ""
+            strategies_instruction = (
+                "\n**RECOMMENDED OPTIONS STRATEGIES** — no options report is "
+                "available for this run. Return an EMPTY LIST for "
+                "``recommended_strategies``; do not fabricate strategies.\n"
+            )
 
         prompt = f"""As the Portfolio Manager, synthesize the risk analysts' debate and deliver the final trading decision.
 
@@ -58,9 +105,9 @@ def create_portfolio_manager(llm):
 {lessons_line}
 **Risk Analysts Debate History:**
 {history}
-
+{options_block}
 ---
-
+{strategies_instruction}
 Be decisive and ground every conclusion in specific evidence from the analysts.{get_language_instruction()}"""
 
         final_trade_decision = invoke_structured_or_freetext(
