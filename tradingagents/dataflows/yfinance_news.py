@@ -98,7 +98,12 @@ def get_news_yfinance(
         if filtered_count == 0:
             return f"No news found for {ticker} between {start_date} and {end_date}"
 
-        return f"## {ticker} News, from {start_date} to {end_date}:\n\n{news_str}"
+        # Wrap third-party article bodies in untrusted_content tags so the
+        # analyst LLM treats them as data, not instructions. See
+        # ``wrap_untrusted`` for the contract.
+        from tradingagents.dataflows.utils import wrap_untrusted
+        wrapped = wrap_untrusted(news_str, source="yfinance_news")
+        return f"## {ticker} News, from {start_date} to {end_date}:\n\n{wrapped}"
 
     except Exception as e:
         return f"Error fetching news for {ticker}: {str(e)}"
@@ -191,7 +196,9 @@ def get_global_news_yfinance(
                 news_str += f"Link: {link}\n"
             news_str += "\n"
 
-        return f"## Global Market News, from {start_date} to {curr_date}:\n\n{news_str}"
+        from tradingagents.dataflows.utils import wrap_untrusted
+        wrapped = wrap_untrusted(news_str, source="yfinance_global_news")
+        return f"## Global Market News, from {start_date} to {curr_date}:\n\n{wrapped}"
 
     except Exception as e:
         return f"Error fetching global news: {str(e)}"

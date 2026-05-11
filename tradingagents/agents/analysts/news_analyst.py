@@ -6,6 +6,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_language_instruction,
     get_macro_environment,
     get_news,
+    get_untrusted_content_instruction,
 )
 from tradingagents.agents.utils.quality_guard import invoke_chain_with_quality_retry
 from tradingagents.dataflows.config import get_config
@@ -33,6 +34,7 @@ def create_news_analyst(llm):
             " (3) at least 3 specific events or stories with concrete dates pulled from the news tools (cite which tool produced each — e.g. 'Per get_news: ...');"
             " (4) the closing markdown summary table. If a news tool returned a bracketed-failure string ('[News unavailable: ...]'), state that explicitly and continue with what you have — never fall silent or emit a one-line response."
             " Source citations are mandatory: every event you cite must reference the tool that produced it; do not invent stories that no tool returned."
+            + get_untrusted_content_instruction()
             + get_language_instruction()
         )
 

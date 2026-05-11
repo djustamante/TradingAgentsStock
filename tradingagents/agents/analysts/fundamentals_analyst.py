@@ -12,6 +12,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_insider_transactions,
     get_language_instruction,
     get_peer_comparison,
+    get_untrusted_content_instruction,
 )
 from tradingagents.agents.utils.quality_guard import invoke_chain_with_quality_retry
 from tradingagents.dataflows.config import get_config
@@ -66,6 +67,7 @@ def create_fundamentals_analyst(llm):
             + "\n  (3) a closing markdown summary table of the key bull/bear factors."
             + "\nIf a tool returned a bracketed-failure string (e.g. '[fundamental data unavailable: ...]'), explicitly state that source was unavailable and continue with what you have — never fall silent or emit a one-line response."
             + "\nSource citations are mandatory: every numeric claim must reference the tool that produced it; do not invent figures that no tool returned."
+            + get_untrusted_content_instruction()
             + get_language_instruction(),
         )
 
