@@ -258,16 +258,18 @@ class PortfolioDecision(BaseModel):
     recommended_strategies: List[OptionsStrategy] = Field(
         default_factory=list,
         description=(
-            "Exactly THREE options strategies appropriate for the rating "
-            "direction crossed with the current IV regime. Pick strategies "
-            "that complement the equity rating: e.g. Buy rating + low IV "
-            "favours long calls / bull call spreads; Buy + high IV favours "
-            "cash-secured puts / covered calls; Hold favours iron condors / "
-            "calendar spreads / covered calls; Sell + high IV favours bear "
-            "call spreads; Sell + low IV favours long puts / bear put "
-            "spreads. Cite real strikes from the options report — never "
-            "invent values. If the options report is empty / unavailable, "
-            "return an empty list rather than hallucinated strategies."
+            "Options strategies appropriate for the rating direction "
+            "crossed with the current IV regime. The exact count is "
+            "specified in the prompt (typically 3, configurable via "
+            "``options_strategies_count``; 0 disables the field). Pick "
+            "strategies that complement the equity rating: e.g. Buy + "
+            "low IV favours long calls / bull call spreads; Buy + high "
+            "IV favours cash-secured puts / covered calls; Hold favours "
+            "iron condors / calendar spreads; Sell + high IV favours "
+            "bear call spreads; Sell + low IV favours long puts / bear "
+            "put spreads. Cite real strikes from the options report — "
+            "never invent values. Return an empty list when the options "
+            "report is empty / unavailable rather than hallucinating."
         ),
     )
 

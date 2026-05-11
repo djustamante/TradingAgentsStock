@@ -205,18 +205,23 @@ def _make_minimal_pm_state(**overrides):
     return state
 
 
-def test_pm_prompt_includes_options_context_when_state_has_options_data():
-    """When the state carries options_report and iv_snapshot, the PM
-    prompt must include them verbatim AND include the strategies
-    instruction telling the LLM to populate recommended_strategies."""
+def _run_pm_with_capture(state, *, config_overrides=None):
+    """Run portfolio_manager_node once with a mock LLM and return the
+    prompt that the structured call saw. Optionally patches the runtime
+    config so the strategies-count override is honoured."""
     from unittest.mock import MagicMock
     from tradingagents.agents.managers.portfolio_manager import create_portfolio_manager
+    from tradingagents.dataflows.config import get_config, set_config
+
+    if config_overrides:
+        set_config(config_overrides)
 
     captured = {}
 
     class _LLM:
         def with_structured_output(self, schema):
             structured = MagicMock()
+
             def _invoke(prompt):
                 captured["prompt"] = prompt
                 return PortfolioDecision(
@@ -224,6 +229,7 @@ def test_pm_prompt_includes_options_context_when_state_has_options_data():
                     executive_summary="x",
                     investment_thesis="y",
                 )
+
             structured.invoke = _invoke
             return structured
 
@@ -231,14 +237,18 @@ def test_pm_prompt_includes_options_context_when_state_has_options_data():
             captured.setdefault("prompt", prompt)
             return MagicMock(content="**Rating**: Hold")
 
+    pm_node = create_portfolio_manager(_LLM())
+    pm_node(state)
+    return captured["prompt"]
+
+
+def test_pm_prompt_includes_options_context_when_state_has_options_data():
     state = _make_minimal_pm_state(
         options_report="Max-pain strike: $200. Call wall: $210. Put wall: $190.",
         iv_snapshot="IV Rank for AAPL: 28/100 (low; long premium is cheap).",
     )
-    pm_node = create_portfolio_manager(_LLM())
-    pm_node(state)
+    prompt = _run_pm_with_capture(state, config_overrides={"options_strategies_count": 3})
 
-    prompt = captured["prompt"]
     # Options-market context block is present + carries real strikes
     assert "Options-Market Context" in prompt
     assert "Max-pain strike: $200" in prompt
@@ -250,36 +260,61 @@ def test_pm_prompt_includes_options_context_when_state_has_options_data():
 
 
 def test_pm_prompt_omits_strategies_when_no_options_data():
-    """When state has neither options_report nor iv_snapshot, the PM
-    must be instructed to return an empty list — never fabricate."""
-    from unittest.mock import MagicMock
-    from tradingagents.agents.managers.portfolio_manager import create_portfolio_manager
-
-    captured = {}
-
-    class _LLM:
-        def with_structured_output(self, schema):
-            structured = MagicMock()
-            def _invoke(prompt):
-                captured["prompt"] = prompt
-                return PortfolioDecision(
-                    rating=PortfolioRating.HOLD,
-                    executive_summary="x",
-                    investment_thesis="y",
-                )
-            structured.invoke = _invoke
-            return structured
-
-        def invoke(self, prompt):
-            captured.setdefault("prompt", prompt)
-            return MagicMock(content="**Rating**: Hold")
-
     state = _make_minimal_pm_state()  # no options_report / iv_snapshot
-    pm_node = create_portfolio_manager(_LLM())
-    pm_node(state)
+    prompt = _run_pm_with_capture(state, config_overrides={"options_strategies_count": 3})
 
-    prompt = captured["prompt"]
     assert "Options-Market Context" not in prompt
-    # The instruction still exists, but in its empty-list form
     assert "no options report is available" in prompt.lower()
     assert "empty list" in prompt.lower()
+
+
+def test_pm_prompt_honours_configured_strategy_count():
+    """Setting ``options_strategies_count: 5`` in the runtime config must
+    flow into the PM prompt as 'EXACTLY FIVE (5)'."""
+    state = _make_minimal_pm_state(
+        options_report="Max-pain: $200. Call wall: $210.",
+        iv_snapshot="IVR: 35/100",
+    )
+    prompt = _run_pm_with_capture(state, config_overrides={"options_strategies_count": 5})
+
+    assert "EXACTLY FIVE (5)" in prompt
+    assert "EXACTLY THREE" not in prompt
+
+
+def test_pm_prompt_disables_strategies_when_count_is_zero():
+    """Count of 0 must produce a zero-strategies instruction even when
+    the run HAS options data."""
+    state = _make_minimal_pm_state(
+        options_report="Max-pain: $200. Call wall: $210.",
+        iv_snapshot="IVR: 35/100",
+    )
+    prompt = _run_pm_with_capture(state, config_overrides={"options_strategies_count": 0})
+
+    assert "set to 0 for this run" in prompt
+    assert "Options-Market Context" not in prompt  # no point including it
+    assert "EXACTLY" not in prompt  # no positive-count instruction
+
+
+def test_pm_prompt_clamps_oversized_count():
+    """Out-of-range values are clamped silently (the CLI fails loud on
+    out-of-range input; this is the inner-layer defense)."""
+    state = _make_minimal_pm_state(
+        options_report="Max-pain: $200.",
+        iv_snapshot="IVR: 35/100",
+    )
+    prompt = _run_pm_with_capture(state, config_overrides={"options_strategies_count": 99})
+
+    assert "EXACTLY TEN (10)" in prompt
+
+
+def test_pm_prompt_falls_back_to_three_on_garbage_count():
+    """Non-int config values shouldn't crash the run."""
+    state = _make_minimal_pm_state(
+        options_report="Max-pain: $200.",
+        iv_snapshot="IVR: 35/100",
+    )
+    prompt = _run_pm_with_capture(
+        state, config_overrides={"options_strategies_count": "not-a-number"},
+    )
+
+    assert "EXACTLY THREE (3)" in prompt

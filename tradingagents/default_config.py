@@ -58,6 +58,11 @@ DEFAULT_CONFIG = {
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,
     "max_recur_limit": 100,
+    # Number of options strategies the Portfolio Manager attaches to its
+    # verdict (rendered as a table under "Recommended Options Strategies").
+    # 0 disables the feature entirely (no prompt instruction, empty list).
+    # Pipeline CLI flag --strategies N overrides this per-run.
+    "options_strategies_count": 3,
     # Hard cap on tool-calling rounds within a single analyst node. The
     # analyst loop is "LLM → tools → LLM → tools → ..." and is meant to
     # terminate when the LLM stops requesting tools. Free-tier models
