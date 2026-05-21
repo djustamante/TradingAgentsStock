@@ -259,6 +259,8 @@ results/
 
 The run-id folder is keyed off the run's start timestamp, so multiple runs on the same day each get their own folder. The canonical JSON/MD reports always live under `by_ticker/`; `by_run/` is just an index by run.
 
+Each report opens with a **Bottom Line Up Front** block carrying a colour-coded rating indicator (✅ Buy · 🟢 Overweight · 🟨 Hold · 🟧 Underweight · ❌ Sell), then renders every pipeline step as its own section (Macro Backdrop, IV Context, 5 Analyst sections, Bull/Bear debate, Research Manager Verdict, Investment Plan, Trader Proposal, 3 Risk Debaters, Portfolio Manager Verdict). The Portfolio Manager Verdict closes with a `### Recommended Options Strategies` table when an options report is available.
+
 ### CLI flags
 
 | Flag | Purpose |
@@ -271,20 +273,27 @@ The run-id folder is keyed off the run's start timestamp, so multiple runs on th
 | `--dry-run` | resolve the queue and print it, then exit — no LLM calls, no writes |
 | `--rerun-today` | bypass the today-already-run dedup; useful for retrying a partially failed batch |
 | `--filter-overrides "Sector=Technology,Price=Over $20"` | patch the Finviz filter dict from the CLI |
+| `--strategies N` | number of options strategies the Portfolio Manager attaches to each verdict (range 0–10; 0 disables; default from `options_strategies_count` config, currently 3) |
 | `-v` / `-q` | DEBUG / WARNING-and-above log levels |
 
 ### New data sources
 
 Beyond the upstream yfinance and Alpha Vantage tools, agents in this fork also call:
 
-- **SEC EDGAR Form 4** (`sec_insider`) — insider buying/selling with cluster summary and a $500k large-purchase flag
-- **Congressional STOCK Act disclosures** (`congress_trades`) — Finnhub primary, Senate Stock Watcher fallback
+- **SEC EDGAR Form 4** (`sec_insider`) — insider buying/selling with cluster summary and a $500k large-purchase flag. XML parsed via `defusedxml` (XXE / billion-laughs hardening).
+- **Congressional STOCK Act disclosures** (`congress_trades`) — Lambda Finance primary, Finnhub secondary, Senate Stock Watcher fallback. Lambda's free tier covers House + Senate with party + state attribution. Senate Stock Watcher fetches are size-capped at 100 MB.
+- **SEC financials** (`lambda_finance_sec`) — Lambda Finance income statement + balance sheet adapter; opt in by setting `tool_vendors.get_income_statement = "lambda_finance"` and `tool_vendors.get_balance_sheet = "lambda_finance"`. Default fundamental_data vendor stays yfinance.
+- **Peer comparison** (`lambda_finance_compare`) — Lambda's `/api/sec/compare` adapter; Fundamentals analyst calls it for single-company tickers with 2-4 sector peers.
+- **ETF holdings** (`etf_holdings`) — yfinance `funds_data`: sector weights, top-10 holdings, concentration metric, asset-class breakdown. Fundamentals analyst routes ETFs (SPY, QQQ, IWM, sector ETFs, ...) here instead of `get_peer_comparison`.
+- **ETF peer comparison** (`etf_peer_compare`) — yfinance prices + info: profile (AUM / expense ratio / yield / beta) + returns (1M/3M/YTD/1Y) + risk (1Y vol + max drawdown) across 2-6 peer ETFs.
 - **Options flow** (`options_flow`) — yfinance option chains: P/C ratios, max pain, call/put walls, IV Rank
 - **Macro snapshot** (`macro_data`) — FRED yields / curve / HY credit spread / USD with FAVORABLE / NEUTRAL / UNFAVORABLE rating
-- **Earnings transcript sentiment** (`earnings_transcript`) — Motley Fool scrape + LLM-scored sentiment with hedge-word and Q&A deflection metrics
+- **Earnings transcript sentiment** (`earnings_transcript`) — Motley Fool scrape + LLM-scored sentiment with hedge-word and Q&A deflection metrics. Transcript content wrapped in `<untrusted_content>` tags before reaching the scorer (prompt-injection defense).
 - **Sector relative strength** (`sector_analysis`) — SPDR sector ETF vs SPY + 63-day correlations to GLD / USO / BTC-USD / UUP / ^VIX
 
 A new **Options Analyst** agent is included in the analyst chain when `enable_options_analyst=True` (default). Risk debaters receive a macro snapshot and IV-rank snapshot pre-fetched once at run start, so the prompt-only debaters can reason about systemic context without their own tool nodes.
+
+The **Portfolio Manager** attaches a `### Recommended Options Strategies` table to every verdict — N concrete strategies (Bull Call Spread, Cash-Secured Put, Iron Condor, ...) with real strikes pulled from the run's options report, chosen to match the rating direction × IV regime. Configure via `--strategies N` (CLI, 0–10) or `options_strategies_count` in config.
 
 ### Optional API keys
 
@@ -292,9 +301,12 @@ In addition to the upstream LLM-provider keys, the screener uses:
 
 ```bash
 export FRED_API_KEY=...                              # https://fred.stlouisfed.org/docs/api/api_key.html
-export FINNHUB_API_KEY=...                           # https://finnhub.io  (congressional trades)
+export FINNHUB_API_KEY=...                           # https://finnhub.io  (congressional trades fallback)
+export LAMBDA_FINANCE_API_KEY=...                    # https://www.lambdafin.com (congressional trades primary + SEC financials)
 export SEC_USER_AGENT="Your Name your@email.com"     # SEC EDGAR fair-access policy
 ```
+
+Keep your `.env` file at mode `0600` (`chmod 600 .env`) so other local users can't read your keys — `~/.tradingagents/cache/` and `~/.tradingagents/memory/` are also owner-only by default.
 
 Each key is optional. When a key is missing, the corresponding dataflow returns a bracketed fallback string that the agent reads as "data unavailable, proceed without it" — the run is never blocked.
 
@@ -318,10 +330,12 @@ Each role above accepts an optional `*_fallbacks` list. On a recoverable upstrea
 cfg["quick_think_llm"]           = "openai/gpt-oss-20b:free"
 cfg["quick_think_llm_fallbacks"] = [
     "meta-llama/llama-3.3-70b-instruct:free",   # different upstream
-    "google/gemini-2.0-flash-exp:free",         # different upstream
+    "deepseek/deepseek-chat-v3.1:free",         # different upstream
     ("openai", "gpt-5-mini"),                   # cross-provider fallback (paid)
 ]
 ```
+
+> OpenRouter periodically delists free models (e.g. `google/gemini-2.0-flash-exp:free` was dropped in May 2026). `FallbackChatModel` treats `404 NotFoundError` as recoverable so a single delisted entry in the chain rotates to the next model instead of crashing the run — but you should still update the config when you notice the WARNING in `pipeline.log`.
 
 Same pattern for `deep_think_llm_fallbacks`, `structured_output_llm_fallbacks`, `quant_llm_fallbacks`, `light_llm_fallbacks`. Plain strings use the run's `llm_provider`; `(provider, model)` tuples (or `{"provider": ..., "model": ...}` dicts) cross providers, which is how a free OpenRouter primary can fall back to a paid OpenAI key from your `.env`. Empty list (the default) disables fallback for that role.
 
