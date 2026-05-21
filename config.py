@@ -35,7 +35,16 @@ def _build_tradingagents_config() -> dict:
     cfg["backend_url"] = "https://openrouter.ai/api/v1"
     cfg["deep_think_llm"] = "nvidia/nemotron-3-super-120b-a12b:free"
     cfg["quick_think_llm"] = "openai/gpt-oss-20b:free"
-    cfg["structured_output_llm"] = "openai/gpt-oss-120b:free"
+    # structured_output_llm routes the Research Manager + Portfolio Manager
+    # (the two agents that use with_structured_output to fill a Pydantic
+    # schema). gpt-oss-120b:free was the original choice but reliably
+    # fails the PortfolioDecision schema on the json_schema path
+    # (returns responses without 'parsed'/'refusal' fields) — the
+    # invoke_structured_or_freetext helper recovers via free-text, but
+    # the structured strategies table loses the Max Profit / Loss column.
+    # DeepSeek V3 chat has consistently produced schema-conforming
+    # output for this schema. Falls back to gpt-oss-120b then llama-3.3.
+    cfg["structured_output_llm"] = "deepseek/deepseek-chat-v3.1:free"
     # quant_llm normally routes Market/Options/Risk to a quant-leaning model.
     # qwen/qwen3-next-80b-a3b-instruct:free is served upstream by Venice,
     # which has been hard-blocking with persistent 429s. Empty string falls
@@ -66,7 +75,8 @@ def _build_tradingagents_config() -> dict:
         "deepseek/deepseek-chat-v3.1:free",
     ]
     cfg["structured_output_llm_fallbacks"] = [
-        "deepseek/deepseek-chat-v3.1:free",
+        "openai/gpt-oss-120b:free",                 # former primary; OK for
+                                                    # simpler schemas
         "meta-llama/llama-3.3-70b-instruct:free",
     ]
     return cfg
