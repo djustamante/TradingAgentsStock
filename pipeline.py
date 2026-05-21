@@ -111,6 +111,19 @@ def _build_parser() -> argparse.ArgumentParser:
             "ignored when --tickers / --ticker-file is set."
         ),
     )
+    parser.add_argument(
+        "--strategies",
+        type=int,
+        metavar="N",
+        default=None,
+        help=(
+            "Number of options strategies the Portfolio Manager attaches to "
+            "its verdict (0 disables the feature; default from "
+            f"options_strategies_count config, currently "
+            f"{CONFIG['tradingagents_config'].get('options_strategies_count', 3)}). "
+            "Range: 0–10."
+        ),
+    )
 
     verbosity = parser.add_mutually_exclusive_group()
     verbosity.add_argument(
@@ -287,7 +300,16 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     today = datetime.now().strftime("%Y-%m-%d")
-    ta_cfg = CONFIG["tradingagents_config"]
+    # Copy so CLI overrides don't mutate the module-level CONFIG.
+    ta_cfg = dict(CONFIG["tradingagents_config"])
+    if args.strategies is not None:
+        # Clamp to the same [0, 10] range the PM helper enforces — fail
+        # the run if the user passed a value outside it so they notice.
+        if not (0 <= args.strategies <= 10):
+            raise SystemExit(
+                f"--strategies {args.strategies} out of range (must be 0–10)"
+            )
+        ta_cfg["options_strategies_count"] = args.strategies
     run_id = args.run_id or datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
     run_dir = output_dir / "by_run" / run_id
 
@@ -313,6 +335,7 @@ def main(argv: list[str] | None = None) -> None:
     print(f"  Provider     : {ta_cfg.get('llm_provider')}")
     print(f"  Deep think   : {ta_cfg.get('deep_think_llm')}")
     print(f"  Quick think  : {ta_cfg.get('quick_think_llm')}")
+    print(f"  Strategies   : {ta_cfg.get('options_strategies_count', 3)} per ticker")
     print(f"  Max tickers  : {max_tickers}")
     print(f"  Queue size   : {len(queue)}")
     print(f"  Already run  : {already_run}")
